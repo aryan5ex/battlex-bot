@@ -84,7 +84,9 @@ def user_menu(uid):
             [KB("ℹ️ Help", "primary")]]
     if uid in ADMINS:
         rows.append([KB("🛠 Admin Panel", "danger")])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True,
+    # one_time_keyboard: menu hides after a tap and re-opens from the keyboard icon next to the input box
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=True,
+                               is_persistent=False,
                                input_field_placeholder="👇 Choose an option")
 
 
@@ -150,6 +152,9 @@ def init_db():
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
     """)
     for table, col in [("tournaments", "room_id TEXT"), ("tournaments", "room_pw TEXT"),
+                       ("tournaments", "p1 INTEGER"), ("tournaments", "p2 INTEGER"),
+                       ("tournaments", "p3 INTEGER"), ("tournaments", "per_kill INTEGER"),
+                       ("tournaments", "top_kill INTEGER"), ("tournaments", "paid INTEGER DEFAULT 0"),
                        ("users", "ref_by INTEGER"), ("users", "ref_paid INTEGER DEFAULT 0"),
                        ("users", "banned INTEGER DEFAULT 0"),
                        ("payments", "created_ts REAL"), ("payments", "reason TEXT")]:
@@ -452,6 +457,26 @@ async def cb(q, ctx, text, markup=None):
             ctx.chat_data["box_chat"] = m.chat_id
 
 
+# ---- tournament card: only the prizes the admin selected are shown ----
+def tprizes(t):
+    d = {k: (t[k] or 0) for k in ("p1", "p2", "p3", "per_kill", "top_kill")}
+    if not any(d.values()) and t["prize"]:  # old tournaments (single prize pool)
+        d["p1"] = t["prize"]
+    return d
+
+
+def prize_lines(t):
+    pr, out = tprizes(t), []
+    for k, ic, lb in (("p1", "🥇", "1st Prize"), ("p2", "🥈", "2nd Prize"), ("p3", "🥉", "3rd Prize")):
+        if pr[k]:
+            out.append(f"{ic} {lb}: <b>₹{pr[k]}</b>")
+    if pr["per_kill"]:
+        out.append(f"🎯 Per Kill: <b>₹{pr['per_kill']}</b>")
+    if pr["top_kill"]:
+        out.append(f"💀 Highest Kill: <b>₹{pr['top_kill']}</b>")
+    return "\n".join(out)
+
+
 def card(t, admin=False):
     filled = filled_slots(t["id"])
     ratio = filled / t["slots"] if t["slots"] else 0
@@ -472,9 +497,11 @@ def card(t, admin=False):
         badge = "🔥 FILLING FAST"
     else:
         badge = "🟢 OPEN"
+    pl = prize_lines(t)
     s = (f"🏆 <b>{e(t['title'])}</b>  <code>#{t['id']}</code>\n{badge}\n{LINE}\n"
          f"🎮 Mode: <b>{e(t['mode'])}</b>\n💵 Entry: <b>₹{t['fee']}</b>\n"
-         f"🥇 Prize Pool: <b>₹{t['prize']}</b>\n🕒 Time: <b>{e(t['time'])}</b>\n"
+         + (pl + "\n" if pl else "") +
+         f"🕒 Time: <b>{e(t['time'])}</b>\n"
          f"👥 Slots: <b>{filled}/{t['slots']}</b>\n{bar}")
     if admin:
         s += f"\n{LINE}\n🔑 Room: <code>{e(t['room_id'] or '—')}</code> | 🔒 Pass: <code>{e(t['room_pw'] or '—')}</code>"
@@ -519,7 +546,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
               f"🏆 Daily Free Fire Tournaments\n⚡ Instant Auto-Verified Deposits\n"
               f"💸 Fast Withdrawals\n🎁 Refer &amp; Earn\n{LINE}\n"
               f"👥 <b>{players_n}</b> players  •  🟢 <b>{open_n}</b> live tournaments\n\n"
-              f"<i>Pick an option from the menu below 👇</i>", user_menu(u.id), effect=FX_FIRE)
+              f"<i>Open the menu with the keyboard icon ⌨️ next to the message box 👇</i>",
+              user_menu(u.id), effect=FX_FIRE)
 
 
 # ---- Tournaments ----
@@ -940,19 +968,27 @@ async def h_a(q, ctx, val):
         return await cb(q, ctx, *terminal_view())
 
 
-# ---- Create Tournament: one box, fill the details, then create ----
-TC_STEPS = ["title", "mode", "fee", "prize", "slots", "time"]
-TC_LABEL = {"title": "Title", "mode": "Mode", "fee": "Entry Fee", "prize": "Prize Pool",
-            "slots": "Slots", "time": "Match Time"}
-TC_ICON = {"title": "📝", "mode": "🎮", "fee": "💵", "prize": "🥇", "slots": "👥", "time": "🕒"}
+# ---- Create Tournament: one box, fill the details (prizes are optional), then create ----
+TC_REQ = ["title", "mode", "fee", "slots", "time"]
+TC_OPT = ["p1", "p2", "p3", "per_kill", "top_kill"]
+TC_STEPS = TC_REQ + TC_OPT
+TC_LABEL = {"title": "Title", "mode": "Mode", "fee": "Entry Fee", "slots": "Slots", "time": "Match Time",
+            "p1": "1st Prize", "p2": "2nd Prize", "p3": "3rd Prize",
+            "per_kill": "Per Kill", "top_kill": "Highest Kill"}
+TC_ICON = {"title": "📝", "mode": "🎮", "fee": "💵", "slots": "👥", "time": "🕒",
+           "p1": "🥇", "p2": "🥈", "p3": "🥉", "per_kill": "🎯", "top_kill": "💀"}
 TC_OPTS = {"mode": ["Solo", "Duo", "Squad", "Clash Squad"],
-           "fee": [0, 10, 20, 30, 50, 100], "prize": [50, 100, 200, 500, 1000, 2000],
-           "slots": [12, 24, 48, 50, 100],
-           "time": ["Today 7:00 PM", "Today 9:00 PM", "Tomorrow 7:00 PM", "Tomorrow 9:00 PM"]}
+           "fee": [0, 10, 20, 30, 50, 100], "slots": [12, 24, 48, 50, 100],
+           "time": ["Today 7:00 PM", "Today 9:00 PM", "Tomorrow 7:00 PM", "Tomorrow 9:00 PM"],
+           "p1": [50, 100, 200, 500, 1000], "p2": [30, 50, 100, 250], "p3": [20, 30, 50, 100],
+           "per_kill": [1, 2, 5, 10], "top_kill": [10, 20, 50, 100]}
 TC_HINT = {"title": "Send the tournament title.\n<i>e.g. BattleX Solo Cup</i>",
            "mode": "Pick a mode or type your own.", "fee": "Pick the entry fee or type a number (0 = Free).",
-           "prize": "Pick the prize pool or type a number.", "slots": "Pick the slots or type a number.",
-           "time": "Pick a time or type it.\n<i>e.g. Today 8:00 PM</i>"}
+           "slots": "Pick the slots or type a number.",
+           "time": "Pick a time or type it.\n<i>e.g. Today 8:00 PM</i>",
+           "p1": "Prize for Rank 1. Pick or type an amount.", "p2": "Prize for Rank 2. Pick or type an amount.",
+           "p3": "Prize for Rank 3. Pick or type an amount.",
+           "per_kill": "Reward for every kill (₹ per kill).", "top_kill": "Bonus for the highest-kill player."}
 
 
 def tc_set(f, field, text):
@@ -963,15 +999,15 @@ def tc_set(f, field, text):
     elif field == "mode":
         if not 2 <= len(text) <= 20:
             return "Mode must be 2-20 characters."
-    elif field in ("fee", "prize", "slots"):
-        lo = {"fee": 0, "prize": 1, "slots": 2}[field]
+    elif field == "time":
+        if not 2 <= len(text) <= 40:
+            return "Time must be 2-40 characters."
+    else:  # numeric fields
+        lo = {"fee": 0, "slots": 2}.get(field, 1)
         if not text.isdigit() or not lo <= int(text) <= 100000:
             return "Send a valid number."
         f[field] = int(text)
         return None
-    elif field == "time":
-        if not 2 <= len(text) <= 40:
-            return "Time must be 2-40 characters."
     f[field] = text
     return None
 
@@ -979,25 +1015,29 @@ def tc_set(f, field, text):
 def tc_form(ctx):
     f = ctx.user_data.setdefault("form", {})
     ctx.user_data.pop("state", None)
-    lines = []
-    for s in TC_STEPS:
-        if s in f:
-            v = f[s]
-            if s == "fee":
-                v = "Free" if v == 0 else f"₹{v}"
-            elif s == "prize":
-                v = f"₹{v}"
-            lines.append(f"{TC_ICON[s]} {TC_LABEL[s]}: <b>{e(v)}</b>")
-        else:
-            lines.append(f"{TC_ICON[s]} {TC_LABEL[s]}: <i>— tap to set —</i>")
-    n = sum(1 for s in TC_STEPS if s in f)
-    foot = "✅ <b>All details filled — ready to create!</b>" if n == 6 else f"Fill all details ({n}/6) 👇"
+
+    def val(s):
+        v = f[s]
+        if s == "fee":
+            return "Free" if v == 0 else f"₹{v}"
+        return f"₹{v}" if s in TC_OPT else v
+
+    lines = ["<b>Required</b>"]
+    for s in TC_REQ:
+        lines.append(f"{TC_ICON[s]} {TC_LABEL[s]}: " + (f"<b>{e(val(s))}</b>" if s in f else "<i>— tap to set —</i>"))
+    lines.append("\n<b>Prizes (optional)</b>")
+    for s in TC_OPT:
+        lines.append(f"{TC_ICON[s]} {TC_LABEL[s]}: " + (f"<b>{e(val(s))}</b>" if s in f else "<i>— off —</i>"))
+    n = sum(1 for s in TC_REQ if s in f)
+    foot = ("✅ <b>Ready to create!</b>\n<i>Only the prizes you set will be shown.</i>" if n == 5
+            else f"Fill required details ({n}/5) 👇")
     rows = []
-    for i in range(0, 6, 2):
-        rows.append([btn(("✅ " if s in f else "") + TC_LABEL[s], f"tc:f:{s}", "success" if s in f else "primary")
-                     for s in TC_STEPS[i:i + 2]])
-    rows.append([btn("🚀 Create Tournament", "tc:publish", "success")] if n == 6
-                else [btn(f"🔒 Create ({n}/6 filled)", "tc:need", "danger")])
+    for grp in (TC_REQ, TC_OPT):
+        for i in range(0, len(grp), 2):
+            rows.append([btn(("✅ " if s in f else TC_ICON[s] + " ") + TC_LABEL[s], f"tc:f:{s}",
+                             "success" if s in f else "primary") for s in grp[i:i + 2]])
+    rows.append([btn("🚀 Create Tournament", "tc:publish", "success")] if n == 5
+                else [btn(f"🔒 Create ({n}/5 filled)", "tc:need", "danger")])
     return f"🏆 <b>Create Tournament</b>\n{LINE}\n" + "\n".join(lines) + f"\n{LINE}\n{foot}", mk(rows, "a:home")
 
 
@@ -1008,9 +1048,12 @@ def tc_field_view(ctx, field, err=""):
     if field in TC_OPTS:
         opts = TC_OPTS[field]
         per = 2 if field in ("mode", "time") else 3
-        label = lambda a: "Free" if (field == "fee" and a == 0) else (f"₹{a}" if field in ("fee", "prize") else str(a))
+        label = lambda a: "Free" if (field == "fee" and a == 0) else (
+            f"₹{a}" if field in ("fee",) + tuple(TC_OPT) else str(a))
         rows = [[btn(label(a), f"tc:v:{field}:{a}", "success") for a in opts[i:i + per]]
                 for i in range(0, len(opts), per)]
+    if field in TC_OPT and field in f:
+        rows.append([btn("🗑 Remove this prize", f"tc:x:{field}", "danger")])
     cur = f"\nCurrent: <b>{e(f[field])}</b>" if field in f else ""
     txt = f"{TC_ICON[field]} <b>{TC_LABEL[field]}</b>\n{LINE}\n{TC_HINT[field]}{cur}"
     if err:
@@ -1035,13 +1078,17 @@ async def h_tc(q, ctx, val):
         await q.answer()
         return await cb(q, ctx, "⚠️ Session expired. Open Create Tournament again.", mk([], "a:home"))
     if op == "need":
-        return await q.answer("Fill all 6 details first", show_alert=True)
+        return await q.answer("Fill all 5 required details first", show_alert=True)
     if op == "form":
         await q.answer()
         return await cb(q, ctx, *tc_form(ctx))
     if op == "f" and rest in TC_STEPS:
         await q.answer()
         return await cb(q, ctx, *tc_field_view(ctx, rest))
+    if op == "x" and rest in TC_OPT:
+        f.pop(rest, None)
+        await q.answer("Removed")
+        return await cb(q, ctx, *tc_form(ctx))
     if op == "v":
         field, _, v = rest.partition(":")
         if field not in TC_STEPS:
@@ -1052,11 +1099,14 @@ async def h_tc(q, ctx, val):
         await q.answer()
         return await cb(q, ctx, *tc_form(ctx))
     if op == "publish":
-        if not all(k in f for k in TC_STEPS):
-            return await q.answer("Fill all 6 details first", show_alert=True)
+        if not all(k in f for k in TC_REQ):
+            return await q.answer("Fill all 5 required details first", show_alert=True)
         await q.answer("🚀 Created!")
-        _, tid = run("INSERT INTO tournaments(title,mode,fee,prize,slots,time) VALUES(?,?,?,?,?,?)",
-                     (f["title"], f["mode"], f["fee"], f["prize"], f["slots"], f["time"]))
+        pool = sum(f.get(k, 0) for k in ("p1", "p2", "p3"))
+        _, tid = run("INSERT INTO tournaments(title,mode,fee,prize,slots,time,p1,p2,p3,per_kill,top_kill) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                     (f["title"], f["mode"], f["fee"], pool, f["slots"], f["time"],
+                      f.get("p1"), f.get("p2"), f.get("p3"), f.get("per_kill"), f.get("top_kill")))
         ctx.user_data.clear()
         t = get("SELECT * FROM tournaments WHERE id=?", (tid,), one=True)
         return await cb(q, ctx, "🚀 <b>Tournament Created!</b>\n\n" + card(t, admin=True),
@@ -1088,7 +1138,7 @@ def tm_kb(t):
         rows.append([btn("✅ Complete", f"tm:done:{tid}", "success"), btn("❌ Cancel & Refund", f"tm:cancel:{tid}", "danger")])
     else:
         rows.append([btn("👥 Players", f"tm:players:{tid}", "primary")])
-        if t["status"] == "completed":
+        if t["status"] == "completed" and not t["paid"]:
             rows.append([btn("🏁 Declare Winner", f"tm:win:{tid}", "success")])
     return mk(rows, "a:manage")
 
@@ -1097,16 +1147,102 @@ def players_of(tid):
     return get("SELECT u.id, u.name, u.ff_uid FROM entries e JOIN users u ON u.id=e.uid WHERE e.tid=?", (tid,))
 
 
-def win_pick_view(t):
-    rows_ = players_of(t["id"])
-    back = f"tm:view:{t['id']}"
-    if not rows_:
-        return f"🏁 <b>Declare Winner</b>\n{LINE}\nNo players in this tournament.", mk([], back)
-    won = {r["uid"] for r in get("SELECT uid FROM winners WHERE tid=?", (t["id"],))}
-    kb_ = [[btn(f"{'🏆 ' if r['id'] in won else ''}{(r['name'] or str(r['id']))[:18]} • FF {r['ff_uid']}",
-                f"tm:wp:{t['id']}:{r['id']}", "success" if r["id"] in won else "primary")] for r in rows_[:50]]
-    return (f"🏁 <b>Declare Winner</b>\n{LINE}\n🏆 {e(t['title'])} • Pool <b>₹{t['prize']}</b>\n"
-            f"👥 Players: <b>{len(rows_)}</b>\nSelect the winning player 👇"), mk(kb_, back)
+# ---- Winner selection by Free Fire UID, based on the prizes that were set ----
+WIN_SLOTS = {"r1": ("🥇", "Rank 1", "p1"), "r2": ("🥈", "Rank 2", "p2"), "r3": ("🥉", "Rank 3", "p3")}
+
+
+def pname(uid):
+    r = get("SELECT name, ff_uid FROM users WHERE id=?", (uid,), one=True)
+    return f"{e(r['name'])} • FF <code>{e(r['ff_uid'])}</code>" if r else f"<code>{uid}</code>"
+
+
+def find_player(tid, ff):
+    return get("SELECT u.id, u.name, u.ff_uid FROM entries en JOIN users u ON u.id=en.uid "
+               "WHERE en.tid=? AND u.ff_uid=?", (tid, str(ff).strip()), one=True)
+
+
+def win_totals(t, wf):
+    pr, tot = tprizes(t), {}
+
+    def add(uid, amt, note):
+        if uid and amt > 0:
+            a = tot.setdefault(uid, [0, []])
+            a[0] += amt
+            a[1].append(note)
+    for k, (ic, lb, pk) in WIN_SLOTS.items():
+        add(wf.get(k), pr[pk], f"{lb}: ₹{pr[pk]}")
+    add(wf.get("hk"), pr["top_kill"], f"Highest kill: ₹{pr['top_kill']}")
+    for uid, n in (wf.get("kills") or {}).items():
+        add(uid, n * pr["per_kill"], f"{n} kills: ₹{n * pr['per_kill']}")
+    return tot
+
+
+def win_form_view(ctx, t, note=""):
+    ctx.user_data.pop("state", None)
+    wf = ctx.user_data.setdefault("wf", {})
+    wf["tid"] = t["id"]
+    pr, tid = tprizes(t), t["id"]
+    lines, rows, ready = [], [], True
+    for k, (ic, lb, pk) in WIN_SLOTS.items():
+        if not pr[pk]:
+            continue
+        u = wf.get(k)
+        lines.append(f"{ic} {lb} (₹{pr[pk]}): " + (pname(u) if u else "<i>— set —</i>"))
+        ready = ready and bool(u)
+        rows.append([btn(f"{ic} {lb}" + (" ✅" if u else ""), f"tm:ws:{tid}:{k}", "success" if u else "primary")])
+    if pr["top_kill"]:
+        u = wf.get("hk")
+        lines.append(f"💀 Highest Kill (₹{pr['top_kill']}): " + (pname(u) if u else "<i>— set —</i>"))
+        ready = ready and bool(u)
+        rows.append([btn("💀 Highest Kill" + (" ✅" if u else ""), f"tm:ws:{tid}:hk", "success" if u else "primary")])
+    if pr["per_kill"]:
+        kills = wf.get("kills") or {}
+        lines.append(f"🎯 Kills (₹{pr['per_kill']}/kill): " + (f"<b>{len(kills)}</b> players" if kills else "<i>— none —</i>"))
+        rows.append([btn("🎯 Add Kills" + (" ✅" if kills else ""), f"tm:wk:{tid}", "success" if kills else "primary")])
+    if not lines:
+        return (f"🏁 <b>Declare Winner</b>\n{LINE}\nNo prizes were set for this tournament.", mk([], f"tm:view:{tid}"))
+    tot = win_totals(t, wf)
+    summ = "\n".join(f"• {pname(u)} → <b>₹{a[0]}</b>" for u, a in tot.items())
+    txt = (f"🏁 <b>Declare Winner</b>\n{LINE}\n🏆 {e(t['title'])}\n"
+           f"👥 Players: <b>{filled_slots(tid)}</b>\n{LINE}\n" + "\n".join(lines))
+    if summ:
+        txt += f"\n{LINE}\n💰 <b>Payout</b>\n{summ}"
+    if note:
+        txt += f"\n\n{note}"
+    if ready and tot:
+        rows.append([btn("✅ Confirm & Pay", f"tm:wpay:{tid}", "success")])
+    return txt, mk(rows, f"tm:view:{tid}")
+
+
+def win_slot_view(ctx, t, slot, err=""):
+    ctx.user_data["state"] = f"wsel_{slot}"
+    if slot == "kills":
+        txt = (f"🎯 <b>Add Kills</b>\n{LINE}\nSend one player per line:\n<code>FF_UID kills</code>\n"
+               f"e.g.\n<code>123456789 7\n987654321 3</code>")
+    else:
+        lb = WIN_SLOTS[slot][1] if slot in WIN_SLOTS else "Highest Kill"
+        txt = f"🏁 <b>{lb}</b>\n{LINE}\nSend the player's <b>Free Fire UID</b>:"
+    if err:
+        txt += f"\n\n❌ {e(err)}"
+    return txt, mk([], f"tm:wfm:{t['id']}")
+
+
+async def pay_winners(ctx, t, tot):
+    if not tot:
+        return "❌ Nothing to pay."
+    tid = t["id"]
+    with tx() as c:
+        if c.execute("SELECT paid FROM tournaments WHERE id=?", (tid,)).fetchone()["paid"]:
+            return "❌ Winners already paid for this tournament."
+        for uid, (amt, notes) in tot.items():
+            c.execute("INSERT OR REPLACE INTO winners(tid,uid,amount) VALUES(?,?,?)", (tid, uid, amt))
+            credit(c, uid, amt, "prize", f"Tournament #{tid}: " + ", ".join(notes))
+        c.execute("UPDATE tournaments SET paid=1, status='completed' WHERE id=?", (tid,))
+    for uid, (amt, notes) in tot.items():
+        await safe_send(ctx, uid, f"🏆 <b>CHAMPION!</b> 🏆\n{LINE}\n💰 ₹{amt} prize added to your wallet.\n"
+                                  + "\n".join(f"• {e(n)}" for n in notes) + "\n🔥 Keep winning!", effect=FX_PARTY)
+        await asyncio.sleep(0.05)
+    return f"✅ Prizes paid to <b>{len(tot)}</b> players • Total ₹{sum(a[0] for a in tot.values())}."
 
 
 async def do_cancel(ctx, tid):
@@ -1124,20 +1260,6 @@ async def do_cancel(ctx, tid):
     return len(uids)
 
 
-async def give_prize(ctx, tid, uid, amt):
-    try:
-        with tx() as c:
-            if not c.execute("SELECT 1 FROM entries WHERE tid=? AND uid=?", (tid, uid)).fetchone():
-                return "❌ This player was not in the tournament."
-            c.execute("INSERT INTO winners(tid,uid,amount) VALUES(?,?,?)", (tid, uid, amt))
-            credit(c, uid, amt, "prize", f"Tournament #{tid}")
-    except sqlite3.IntegrityError:
-        return "❌ This player already received a prize for this tournament."
-    await safe_send(ctx, uid, f"🏆 <b>CHAMPION!</b> 🏆\n{LINE}\n💰 ₹{amt} prize added to your wallet.\n🔥 Keep winning!",
-                    effect=FX_PARTY)
-    return f"✅ Prize ₹{amt} sent to <code>{uid}</code>."
-
-
 async def send_room(ctx, tid, rid, pw):
     t = get("SELECT * FROM tournaments WHERE id=?", (tid,), one=True)
     run("UPDATE tournaments SET room_id=?, room_pw=? WHERE id=?", (rid, pw, tid))
@@ -1150,13 +1272,6 @@ async def send_room(ctx, tid, rid, pw):
             sent += 1
         await asyncio.sleep(0.05)
     return sent
-
-
-def prize_kb_text(t, puid):
-    r = get("SELECT name, ff_uid FROM users WHERE id=?", (puid,), one=True)
-    who = f"{e(r['name'])} • FF <code>{e(r['ff_uid'])}</code>" if r else f"<code>{puid}</code>"
-    return (f"💰 <b>Prize Amount</b>\n{LINE}\n🏆 {e(t['title'])}\n🙍 {who}\n\n"
-            f"Tap the full pool or type the amount:")
 
 
 async def h_tm(q, ctx, val):
@@ -1184,18 +1299,22 @@ async def h_tm(q, ctx, val):
         return await cb(q, ctx, f"👥 <b>Players — {e(t['title'])}</b> ({len(rows)})\n{LINE}\n{txt}", mk([], view_back))
     if op == "win":
         ctx.user_data.clear()
-        return await cb(q, ctx, *win_pick_view(t))
-    if op == "wp":
-        puid = int(parts[2])
+        if t["paid"]:
+            return await cb(q, ctx, "✅ Winners are already declared and paid.", mk([], view_back))
+        return await cb(q, ctx, *win_form_view(ctx, t))
+    if op == "wfm":
+        return await cb(q, ctx, *win_form_view(ctx, t))
+    if op == "ws" and len(parts) > 2 and parts[2] in ("r1", "r2", "r3", "hk"):
+        return await cb(q, ctx, *win_slot_view(ctx, t, parts[2]))
+    if op == "wk":
+        return await cb(q, ctx, *win_slot_view(ctx, t, "kills"))
+    if op == "wpay":
+        wf = ctx.user_data.get("wf") or {}
+        if wf.get("tid") != tid:
+            return await cb(q, ctx, "⚠️ Session expired.", mk([], view_back))
+        res = await pay_winners(ctx, t, win_totals(t, wf))
         ctx.user_data.clear()
-        ctx.user_data.update(state="win_amt", form={"tid": tid, "uid": puid})
-        return await cb(q, ctx, prize_kb_text(t, puid),
-                        mk([[btn(f"Full pool ₹{t['prize']}", f"tm:wa:{tid}:{puid}:{t['prize']}", "success")]],
-                           f"tm:win:{tid}"))
-    if op == "wa":
-        ctx.user_data.clear()
-        res = await give_prize(ctx, tid, int(parts[2]), int(parts[3]))
-        return await cb(q, ctx, res, mk([[btn("🏁 Pick another winner", f"tm:win:{tid}", "success")]], view_back))
+        return await cb(q, ctx, res, mk([], view_back))
     if op == "close":
         run("UPDATE tournaments SET status='closed' WHERE id=? AND status='open'", (tid,))
     elif op == "open":
@@ -1492,7 +1611,7 @@ async def h_s(q, ctx, val):
 
 
 # ---- admin typed input ----
-ADMIN_STATE_PREFIXES = ("tc_", "room_", "win_", "um_", "ab_", "bc_", "set_")
+ADMIN_STATE_PREFIXES = ("tc_", "room_", "wsel_", "um_", "ab_", "bc_", "set_")
 
 
 async def admin_state(update, ctx, state, text):
@@ -1518,17 +1637,34 @@ async def admin_state(update, ctx, state, text):
             return await show(ctx, chat, "⚠️ Session expired.", mk([], "a:home"))
         sent = await send_room(ctx, tid, rid, text)
         return await show(ctx, chat, f"📨 Room details sent to <b>{sent}</b> players. ✅", mk([], f"tm:view:{tid}"))
-    if state == "win_amt":
-        tid, puid = f.get("tid"), f.get("uid")
-        if not text.isdigit() or int(text) <= 0:
-            t = get("SELECT * FROM tournaments WHERE id=?", (tid,), one=True)
-            return await show(ctx, chat, (prize_kb_text(t, puid) if t else "") + "\n\n❌ Send a valid amount.",
-                              mk([[btn(f"Full pool ₹{t['prize']}", f"tm:wa:{tid}:{puid}:{t['prize']}", "success")]]
-                                 if t else [], f"tm:win:{tid}"))
-        ctx.user_data.clear()
-        res = await give_prize(ctx, tid, puid, int(text))
-        return await show(ctx, chat, res, mk([[btn("🏁 Pick another winner", f"tm:win:{tid}", "success")]],
-                                             f"tm:view:{tid}"))
+    if state.startswith("wsel_"):
+        slot = state[5:]
+        wf = ctx.user_data.get("wf") or {}
+        t = get("SELECT * FROM tournaments WHERE id=?", (wf.get("tid"),), one=True)
+        if not t:
+            return await show(ctx, chat, "⚠️ Session expired.", mk([], "a:home"))
+        if slot == "kills":
+            kills, bad = wf.setdefault("kills", {}), []
+            for line in text.splitlines():
+                if not line.strip():
+                    continue
+                pp = [x for x in re.split(r"[\s,:=\-]+", line.strip()) if x]
+                p = find_player(t["id"], pp[0]) if len(pp) == 2 and pp[1].isdigit() else None
+                if not p:
+                    bad.append(line.strip())
+                elif int(pp[1]) == 0:
+                    kills.pop(p["id"], None)
+                else:
+                    kills[p["id"]] = int(pp[1])
+            note = ("❌ Not found / invalid:\n" + "\n".join(f"<code>{e(b)}</code>" for b in bad)) if bad else ""
+            return await show(ctx, chat, *win_form_view(ctx, t, note))
+        p = find_player(t["id"], text)
+        if not p:
+            return await show(ctx, chat, *win_slot_view(ctx, t, slot, "No player with this Free Fire UID in this tournament."))
+        if slot in WIN_SLOTS and any(wf.get(k) == p["id"] for k in WIN_SLOTS if k != slot):
+            return await show(ctx, chat, *win_slot_view(ctx, t, slot, "This player already has another rank."))
+        wf[slot] = p["id"]
+        return await show(ctx, chat, *win_form_view(ctx, t))
     if state == "um_find":
         if not text.isdigit():
             return await show(ctx, chat, f"🔎 <b>Find User</b>\n{LINE}\n❌ Send a numeric Telegram ID.", mk([], "a:users"))
@@ -1603,7 +1739,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     state = ctx.user_data.get("state")
     if not state:
-        return await say(update, "👇 Choose an option from the menu", user_menu(uid))
+        return await say(update, "👇 Open the menu with the keyboard icon ⌨️", user_menu(uid))
     await del_msg(update)  # keep the chat clean: the box is updated instead
 
     if uid in ADMINS and state.startswith(ADMIN_STATE_PREFIXES):
@@ -1692,7 +1828,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ctx, f"💸 <b>Withdraw #{wid}</b>\n👤 <code>{uid}</code>\n💵 ₹{amt}\n📲 UPI: <code>{e(text)}</code>",
             admin_review_kb("wd_ok", "wd_no", wid))
 
-    await say(update, "👇 Choose an option from the menu", user_menu(uid))
+    await say(update, "👇 Open the menu with the keyboard icon ⌨️", user_menu(uid))
 
 
 async def h_close(q, ctx, val):
